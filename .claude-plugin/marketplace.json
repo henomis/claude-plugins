@@ -1,0 +1,33 @@
+{
+  "name": "henomis",
+  "owner": {
+    "name": "Simone Vellei",
+    "url": "https://github.com/henomis"
+  },
+  "metadata": {
+    "description": "Agent skills for building multi-agent systems in Go with phero, packtrail and stiggy."
+  },
+  "plugins": [
+    {
+      "name": "phero",
+      "source": "./plugins/phero",
+      "description": "Build AI agents and multi-agent systems in Go with phero: agents, tools, memory, handoffs, RAG, MCP, A2A and NATS.",
+      "category": "development",
+      "keywords": ["go", "agents", "llm", "rag", "mcp"]
+    },
+    {
+      "name": "packtrail",
+      "source": "./plugins/packtrail",
+      "description": "Write durable, event-sourced workflows on NATS JetStream with packtrail: flow graphs, workers and the client.",
+      "category": "development",
+      "keywords": ["go", "workflow", "nats", "jetstream", "durable-execution"]
+    },
+    {
+      "name": "stiggy",
+      "source": "./plugins/stiggy",
+      "description": "Deploy multi-agent fleets on NATS with stiggy: fleet YAML, crews, patterns and the Go library.",
+      "category": "development",
+      "keywords": ["go", "agents", "nats", "multi-agent", "yaml"]
+    }
+  ]
+}

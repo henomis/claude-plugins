@@ -1,0 +1,10 @@
+{
+  "name": "packtrail",
+  "version": "1.0.0",
+  "description": "Write durable, event-sourced workflows on NATS JetStream with packtrail (github.com/henomis/packtrail).",
+  "author": { "name": "Simone Vellei", "url": "https://github.com/henomis" },
+  "homepage": "https://henomis.github.io/packtrail/",
+  "repository": "https://github.com/henomis/packtrail",
+  "license": "Apache-2.0",
+  "keywords": ["go", "workflow", "nats", "jetstream", "durable-execution"]
+}

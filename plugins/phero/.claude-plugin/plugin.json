@@ -1,0 +1,10 @@
+{
+  "name": "phero",
+  "version": "1.0.0",
+  "description": "Build AI agents and multi-agent systems in Go with phero (github.com/henomis/phero/v2).",
+  "author": { "name": "Simone Vellei", "url": "https://github.com/henomis" },
+  "homepage": "https://github.com/henomis/phero",
+  "repository": "https://github.com/henomis/phero",
+  "license": "Apache-2.0",
+  "keywords": ["go", "agents", "llm", "rag", "mcp"]
+}

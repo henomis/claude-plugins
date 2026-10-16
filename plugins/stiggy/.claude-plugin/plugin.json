@@ -1,0 +1,10 @@
+{
+  "name": "stiggy",
+  "version": "1.0.0",
+  "description": "Deploy multi-agent fleets on NATS with stiggy (github.com/henomis/stiggy), built on phero and packtrail.",
+  "author": { "name": "Simone Vellei", "url": "https://github.com/henomis" },
+  "homepage": "https://simonevellei.com/stiggy/guide.html",
+  "repository": "https://github.com/henomis/stiggy",
+  "license": "Apache-2.0",
+  "keywords": ["go", "agents", "nats", "multi-agent", "yaml"]
+}
