@@ -1,6 +1,6 @@
 ---
 name: phero
-description: Build LLM agents and AI apps in Go with phero (github.com/henomis/phero/v2). Use it whenever the user wants to create, scaffold, extend or debug a Go program that uses phero. That includes chatbots, tool-calling agents, orchestrators with sub-agents, handoffs or triage, RAG over their own documents (embeddings, chunking, Qdrant/pgvector/Weaviate vector stores), semantic long-term memory, streaming, tracing, MCP servers, skills, A2A and the NATS Agent Protocol, even when they only say "an agent in Go with phero". It grounds the code in the exact phero version from the Go module cache (source, examples, go doc) and covers agent.New, llm.NewTool, Run/RunStream, AddHandoff, AsTool, memory, and the rag/vectorstore/embedding/textsplitter packages.
+description: Build LLM agents and AI apps in Go with phero (github.com/henomis/phero/v2). Use it whenever the user wants to create, scaffold, extend or debug a Go program that uses phero. That includes chatbots, tool-calling agents, orchestrators with sub-agents, handoffs or triage, RAG over their own documents (embeddings, chunking, Qdrant/pgvector/Weaviate vector stores), semantic long-term memory, streaming, span tracing and OpenTelemetry, stopping runs, MCP servers, skills, A2A and the NATS Agent Protocol, even when they only say "an agent in Go with phero". It grounds the code in the exact phero version from the Go module cache (source, examples, go doc) and covers agent.New, llm.NewTool, Run/RunStream, AddHandoff, AsTool, memory, and the rag/vectorstore/embedding/textsplitter packages.
 ---
 
 # Building agents with phero
@@ -83,12 +83,29 @@ if err != nil { return err }
 
 res, err := a.Run(ctx, llm.Text("What is 15 - 7 + 23?"))
 if err != nil { return err }
-fmt.Println(res.TextContent())   // res.Summary has tokens, latency, iterations
+fmt.Println(res.TextContent())   // res.Summary: StopReason, tokens, latency, per model/agent/tool
 ```
 
 `Run` loops: call the LLM, run the requested tools, append the results, and
 repeat until the model answers. The loop stops after `agent.DefaultMaxIterations`
 (25); change it with `a.SetMaxIterations(n)`.
+
+Since v2.2.0, `Run` returns the partial result **together with** the error on
+every failure after the run starts (LLM, guardrail, memory, max iterations,
+cancellation), so `res` may be non-nil when `err != nil`. Read
+`res.Summary.StopReason` (`trace.StopFinal`, `StopMaxIterations`,
+`StopHandoff`, `StopRequested`, `StopCancelled`, `StopGuardrail`, `StopError`)
+instead of parsing error strings.
+
+### Stopping a run on purpose
+
+A tool handler can end the run, for example to pause for a human, by returning
+`agent.StopRun(cause)`. The current round's tool calls finish, no further LLM
+call is made, `StopReason` is `trace.StopRequested`, and the error matches
+`errors.Is(err, agent.ErrStopRun)`. It is not treated as a failure (tool call
+and run span are not marked failed). A sub-agent stopped through `AsTool`
+stops its caller too. Cancelling ctx with `context.WithCancelCause(...)` and a
+`StopRun` cause behaves the same way.
 
 Input is typed content parts: `llm.Text`, `llm.ImageURL`, `llm.ImageFile`.
 
@@ -183,7 +200,8 @@ program for each one. Read the matching program before you write your own:
 | Sequential pipeline | `prompt-chaining` |
 | Shared state | `supervisor-blackboard` |
 | Human approval | `human-in-the-loop` |
-| Streaming, tracing, middleware | `streaming`, `tracing`, `llm-middleware` |
+| Streaming, middleware | `streaming`, `llm-middleware` |
+| Tracing (terminal / OpenTelemetry) | `tracing`, `tracing-otel` |
 | RAG chatbot over documents | `rag-chatbot` |
 | Semantic long-term memory | `long-term-memory` |
 | MCP, A2A, NATS, skills | `mcp`, `playwright-mcp`, `a2a`, `nats-agent`, `nats-memory`, `skills` |
@@ -207,9 +225,40 @@ for ev, err := range a.RunStream(ctx, llm.Text(prompt)) {
 
 ## Tracing
 
-`a.SetTracer(text.NewDefault())` (`trace/text`) prints colored logs of LLM calls,
-tool calls and memory. Other tracers: `trace/jsonfile` (NDJSON) and `trace/otel`
-(OpenTelemetry). `trace.NewLLM` wraps a raw LLM client.
+v2.2.0 replaced the flat event tracer with **span-based tracing**. The old API
+(`SetTracer`, `trace.Tracer`, `trace.Event`, `trace.Noop`, `trace.NewLLM`,
+`trace.WithTracer`) is gone. Code or blog posts using it will not compile.
+
+Every run is a tree of spans (run → model calls, tools, handoffs, memory,
+retrieval, embeddings, middleware), parented through the context. A
+`trace.Provider` sends finished spans to one or more processors:
+
+```go
+import (
+    "github.com/henomis/phero/v2/trace"
+    "github.com/henomis/phero/v2/trace/text"
+)
+
+p := trace.NewProvider(trace.WithProcessor(text.New(os.Stderr)))  // indented span tree
+defer p.Shutdown(ctx)
+a.SetTracing(p)                    // or ctx = trace.WithProvider(ctx, p): sub-agents inherit it
+```
+
+- Backends: `trace/text` (terminal tree; `WithMaxLen`, `WithVerbose`),
+  `trace/jsonfile` (one NDJSON line per span), `trace/otel` (OpenTelemetry,
+  GenAI semantic conventions), `trace/tracetest` (in-memory recorder for tests).
+- OpenTelemetry: `exp := otel.New(tp)` with the app's own SDK
+  `TracerProvider`, then `trace.NewProvider(trace.WithIDSource(exp.IDSource()), trace.WithProcessor(exp))`
+  so phero and OTel share trace/span IDs. Prompt/response content is off by
+  default; enable with `otel.WithContent(true)`. See `examples/tracing-otel`.
+- Wrappers: `trace.Content`, `trace.Redact` (strip/mask content) and
+  `trace.Batch` (export in the background).
+- Context: `trace.WithSession(ctx, id)`, `trace.WithAttributes(ctx, trace.String(k, v))`,
+  W3C propagation with `trace.Inject(ctx)` / `trace.Extract(ctx, traceparent)`,
+  and `trace.LogAttrs(ctx)` for trace/span IDs in `slog`.
+- `trace.InstrumentLLM(client)` traces direct LLM calls made outside an agent.
+- `res.Summary` is built from spans even with no provider set, so token and
+  cost totals work without exporting anything.
 
 ## LLM middleware
 
@@ -234,5 +283,10 @@ semantic caching. The agent sees a normal `llm.LLM`.
   `*agent.ToolAlreadyExistsError`. Clean up generated names with `agent.SanitizeToolName`.
 - Every constructor returns an error. Check it, because bad schemas fail at
   construction time.
+- Don't discard `res` when `Run` returns an error: it carries the partial
+  output and `Summary.StopReason`. Check `errors.Is(err, agent.ErrStopRun)`
+  before treating an error as a failure.
+- With the OpenAI backend, `Usage.InputTokens` excludes cached tokens (they
+  are in `CacheReadTokens`).
 - Use `res.TextContent()` for the final answer. When a run ends in a handoff,
   `Parts` holds only what the model wrote next to the handoff call.

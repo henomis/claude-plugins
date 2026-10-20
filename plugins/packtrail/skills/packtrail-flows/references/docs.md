@@ -219,7 +219,7 @@ start: plan
 
 ##  choice
 
-Routes on the first rule whose `when` expression is true; exactly one rule must be the `default`. Every evaluation is recorded as a `ChoiceEvaluated` event, so the route taken is part of the history.
+Routes on the first rule whose `when` expression is true; exactly one rule must be the `default`. Every evaluation is recorded as a `ChoiceEvaluated` event, so the route taken is part of the history. A rule may carry a `name` (unique within the node), recorded on that event so the history says why, not just which rule index.
 
 yaml
 
@@ -227,7 +227,7 @@ yaml
 - id: route
   type: choice
   rules:
-    - {when: "signals'manager-decision'.approved", to: pay}
+    - {name: approved, when: "signals['manager-decision'].approved", to: pay}
     - {when: "results.check.amount > 1000 && visits.check < 3", to: check}
     - {default: true, to: reject}
 ```
@@ -259,10 +259,10 @@ A `fanout` starts its `branches` in parallel; its `next` must be the `join` that
 
 | join field | Description                                                                                                                                                                                                                                                                         |
 |------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| policy     | `all` (default): every branch must succeed. `any`: the first success settles it. `quorum:N`: N successes. Once settled, branches still running are cancelled — a subflow branch's child too, unless its `on_parent_close` is `abandon`: then it carries on, unlinked from the join. |
+| policy     | `all` (default): every branch must succeed. `any`: the first success settles it. `quorum:N`: N successes. These settle as soon as the outcome is known; branches still running are then cancelled — a subflow branch's child too, unless its `on_parent_close` is `abandon`: then it carries on, unlinked from the join. `min:N`: waits for every branch, then succeeds if at least N did (`min:0` never fails); the output holds every success, and `branches` and `errors` tell which failed and why — the way to tolerate failures without losing results. |
 | wait_for   | The branches the policy counts (default: all branches of the fanout).                                                                                                                                                                                                               |
 | next       | Successor once the policy is met.                                                                                                                                                                                                                                                   |
-| on_failure | Handler when the policy can no longer be met; without it the execution fails with `join_failed`.                                                                                                                                                                                    |
+| on_failure | Handler when the policy can no longer be met (for `min:N`, once every branch has finished); without it the execution fails with `join_failed`.                                                                                                                                                                                    |
 
 After the join, `results.<join>` holds the branch outputs and `branches` their status. Branches typically contribute to shared state through reducer channels.
 
@@ -423,7 +423,9 @@ func handle(ctx context.Context, j *worker.Job) (*worker.Result, error) {
 | Interrupted(&v)                      | On a resumed run (every attempt), the payload this node interrupted with.                                                                                                                 |
 | Progress(v)                          | Publish an intermediate result on `<ns>.progress.<exec>.<node>`.                                                                                                                          |
 | Store()                              | The long-term store of the worker's namespace, the same one `Client.Store()` reads: `Put`, `Get`, `Delete`, `Keys`. Writes are outside the log, so keep them idempotent under redelivery. |
-| Traceparent                          | W3C trace context propagated from the start command.                                                                                                                                      |
+| ResumedBy                            | On a resumed run (every attempt), who resumed it (`WithResumedBy`); empty when the resume named nobody.                                                                                   |
+| Traceparent                          | W3C trace context of the command that scheduled the job: the one given with `WithTraceparent` at start reaches the jobs that follow from the start. Empty when that command had none, such as a timer, or a signal or resume sent with `Client`. |
+| Logger()                             | The worker's logger with this attempt bound: `exec`, `flow`, `node`, `key`, `kind`, `generation`, and `attempt`, plus `trace_id` and `span_id` from a valid traceparent. See Logging.        |
 | Meta, DecodeMeta(&v)                 | The node's `meta` from the execution's flow version (raw JSON, nil when absent), and a decoder for it.                                                                                    |
 
 ### Outcomes
@@ -446,14 +448,14 @@ Workers in other languages implement the protocol; `PT_CONFORMANCE_WORKER="<comm
 
 ## The client
 
-`eng.Client()` returns a client bound to the engine's namespace; from another process use `packtrail.NewClient(nc, packtrail.WithClientNamespace("acme"))`. It is safe for concurrent use and performs no I/O until the first call.
+`eng.Client()` returns a client bound to the engine's namespace; from another process use `packtrail.NewClient(nc, packtrail.WithClientNamespace("acme"))`. It is safe for concurrent use and performs no I/O until the first call. `WithClientLogger(l)` sets the logger for its own diagnostics (default `slog.Default()`); the engine's client uses the engine's logger.
 
 | Method                          | Description                                                                                                                                                                                                                                                                                                        |
 |---------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Start(flow, input, …)           | Start an execution; returns its id. `WithExecutionID` makes it idempotent on that id (an id of another flow's execution fails with `ErrExecutionConflict`; `WithJoinExisting(false)` fails with `ErrExecutionExists` instead of joining), `WithVersion` pins a flow version, `WithTraceparent` propagates a trace. |
 | Signal(exec, name, payload)     | Deliver a signal (buffered if no await is waiting yet); `WithSignalID` deduplicates.                                                                                                                                                                                                                               |
 | Update(exec, writes)            | Write channels synchronously and return the state right after.                                                                                                                                                                                                                                                     |
-| Resume(exec, node, value)       | Re-run an interrupted node with a value.                                                                                                                                                                                                                                                                           |
+| Resume(exec, node, value, …)    | Re-run an interrupted node with a value. `WithResumedBy(actor)` (≤ 256 bytes) records who resumed it on the history and hands it to the worker as `Job.Context.ResumedBy`.                                                                                                                                                                                                                                                           |
 | Cancel(exec, reason)            | Cancel; a no-op on a finished execution.                                                                                                                                                                                                                                                                           |
 | Get(exec)                       | Current state (archived executions are read from the archive).                                                                                                                                                                                                                                                     |
 | Wait(exec)                      | Block until the execution finishes and return the final state. Only `ctx` ends it early.                                                                                                                                                                                                                           |
@@ -549,6 +551,21 @@ again, _ := c.Rerun(ctx, id, "draft")
 | decision_too_large | One decision would exceed 1 000 events.                                                                                                                      |
 
 Node failures — `error`, `timeout`, `invalid_output`, `delivery_failed`, `join_failed`, `child_failed` — route to `on_failure` when the failed node declares one. Budget, `max_steps`, an await timeout without a route, an expression error and an oversized decision always end the execution.
+
+------------------------------------------------------------------------
+
+## Logging
+
+The engine (`WithLogger`), workers (`worker.WithLogger`) and clients (`WithClientLogger`) log through a `*slog.Logger`, with the request context when there is one. Messages start with `packtrail:` or `worker:`, and attributes use the same keys everywhere: `exec`, `flow`, `node`, `key`, `kind`, `generation`, `attempt`, `cmd`, `type`, `seq`, `err`, `duration`.
+
+| Level | What |
+|---|---|
+| Error | Work lost or an operator must act: an execution quarantined, a dead letter not written, a handler panic. |
+| Warn  | Something failed and is retried, or was dead-lettered. |
+| Info  | Rejected commands and commands for archived executions. |
+| Debug | One line per decision (`packtrail: decision applied`: type, events, seq, duration), per job sent (`packtrail: job dispatched`) and per attempt (`worker: job started` with the queue wait, `worker: job ended` with the outcome and duration). |
+
+A handler logs through `job.Logger()`, so its lines carry the same keys as the engine's: filter on `exec` to follow one execution across processes. When the job carries a traceparent (`WithTraceparent` at start), worker lines also carry `trace_id` and `span_id`, and the engine's decision lines `trace_id`, so logs join the traces of the caller.
 
 ------------------------------------------------------------------------
 
@@ -648,7 +665,7 @@ On a laptop (Ryzen 7 5825U, embedded nats-server, file storage): ≈ 2 100 execu
 
 ## CLI
 
-`packtrail -server URL -ns NAMESPACE <command>`. It is a client of the deployment, plus `run` to host an engine.
+`packtrail [-server URL] [-ns NAMESPACE] [-log-level L] [-log-format F] <command>`. It is a client of the deployment, plus `run` to host an engine. Output is JSON on stdout; logs go to stderr at `-log-level` (`debug`, `info`, `warn`, `error`; default `$PACKTRAIL_LOG_LEVEL` or `info`) in `-log-format` (`text` or `json`; default `$PACKTRAIL_LOG_FORMAT` or `text`). `packtrail-ui` takes the same two flags.
 
 packtrail
 
@@ -669,7 +686,7 @@ flows                                  # list registered versions
 start <flow> -input JSON -id ID -version HASH -wait
 signal <exec> <name> -payload JSON -id ID
 update <exec> -writes JSON -id ID
-resume <exec> <node> -value JSON
+resume <exec> <node> -value JSON -by ACTOR
 cancel <exec> -reason TEXT
 get <exec> -seq N                    # state now, or right after event N
 history <exec>
@@ -741,7 +758,7 @@ command
 | complete  | `key, generation, attempt, output?, writes?, next?, usage?, cache_key?`                                                                             |
 | fail      | `key, generation, attempt, error, retryable, reason?`                                                                                               |
 | interrupt | `key, generation, attempt, payload?`                                                                                                                |
-| resume    | `node, key?, value?`                                                                                                                                |
+| resume    | `node, key?, value?, by?`                                                                                                                           |
 | signal    | `name, payload?` — the command id is the signal id                                                                                                  |
 | update    | `writes` — send with `reply`; the command id is the update id                                                                                       |
 | cancel    | `reason?`                                                                                                                                           |
@@ -756,7 +773,7 @@ job
 
 ```, "channels": {}, "results": {}, "last_node": "", "visits": {},
              "signals": {}, "branches": {}, "counters": {}, "errors": {},
-             "item": …, "index": …, "resume": …, "interrupt": …},
+             "item": …, "index": …, "resume": …, "resumed_by": …, "interrupt": …},
  "reply": "<ns>.cmd.<p>.e1", "cache_key": "…", "concurrency": {"key": "…", "max": 2},
  "traceparent": "…"}
 ```
@@ -803,12 +820,12 @@ envelope
 | ExecutionFailed    | `error, reason, node?, cancel_children[]`                                              |
 | ExecutionCancelled | `reason, cancel_children[]`                                                            |
 | NodeEntered        | `node`                                                                                 |
-| NodeScheduled      | `key, node, kind, index?, generation, attempt, owner?, item?, resume?`                 |
+| NodeScheduled      | `key, node, kind, index?, generation, attempt, owner?, item?, resume?, resumed_by?`    |
 | NodeCompleted      | `key, node, generation, attempt, output?, writes?, next?, usage?, cached?, cache_key?` |
 | NodeFailed         | `key, node, generation, attempt, error, reason, will_retry`                            |
 | NodeInterrupted    | `key, node, generation, payload?`                                                      |
 | NodeCancelled      | `key, node, reason`                                                                    |
-| ChoiceEvaluated    | `node, rule, to, error?`                                                               |
+| ChoiceEvaluated    | `node, rule, name?, to, error?`                                                        |
 | FanoutStarted      | `node, join, branches[]`                                                               |
 | JoinCompleted      | `node, fanout, succeeded[], failed[], ok, output, cancel_children[]?`                  |
 | AwaitStarted       | `node, signal, timer_id`                                                               |

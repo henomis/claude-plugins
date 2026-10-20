@@ -59,10 +59,11 @@ uses that number to detect updates.
 - `golib.sh` is the same file in every skill, because each plugin installs on
   its own. Edit one copy and copy it to the others.
 - `plugins/packtrail/skills/packtrail-flows/references/docs.md` is generated
-  from packtrail's `web/docs.html` with pandoc. It currently describes v1.0.1.
+  from packtrail's `web/docs.html` with pandoc, then patched by hand. It
+  currently describes v1.0.3.
 - `plugins/stiggy/skills/stiggy-fleet/references/fleet-reference.md` is a copy
-  of stiggy's `docs/reference.md`. The v0.2.0 release ships the same content
-  as `web/guide.html`.
+  of stiggy's `docs/reference.md`, with the v0.3.1 additions (tracing, logs,
+  budget counters, named pattern rules) taken from `web/guide.html`.
 
 When a library release changes the API, refresh the cheat sheets and
 references, but they don't have to land on release day. Until they do, the

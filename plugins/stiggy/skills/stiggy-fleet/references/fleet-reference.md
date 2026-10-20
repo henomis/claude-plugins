@@ -19,6 +19,7 @@ crews: {}
 patterns: {}
 expose: {}
 schedules: {}
+tracing: {exporter: otlp}   # optional: span export, see tracing
 ```
 
 Names (keys of every section, node ids) must match `[A-Za-z0-9_-]`. Agent,
@@ -235,13 +236,22 @@ object when it has an `output_schema`. An empty answer (from an agent or a
 remote) is an error the node's `retry` absorbs; without one the step fails.
 An agent that chose a route may answer empty: the route is its decision.
 
-**Usage counters** for budgets: `agent_steps`, `tokens_in`, `tokens_out` and
-`cost_usd`. They are charged for every run, including failed and paused
-ones.
+**Usage counters** for budgets (every agent step reports them): `agent_steps`
+(the step's agent and each delegate run), `tokens_in`, `tokens_out`,
+`tokens_cache_read`, `tokens_cache_write`, `tokens_reasoning` (part of
+`tokens_out`), `cost_usd`, `llm_calls`, `tool_calls` and `tool_errors`.
+`tokens_in`, `tokens_out` and `cost_usd` are also broken down as
+`<counter>__agent__<agent>` and `<counter>__model__<model>` (characters outside
+`[A-Za-z0-9_-]` become `_`, e.g. `cost_usd__model__gpt-4_1`). Zero counters are
+left out; delegates count in the step that calls them. They are charged for
+every run, including failed and paused ones, and checked on completion,
+failure and pause.
 
 **Human in the loop:** a paused step shows `{kind, agent, node, question |
 answer}` in `State.Tasks[...].Interrupt`. Resume it with
-`stiggy resume <exec> <node> -value '"answer"'` or `Client.Resume`.
+`stiggy resume <exec> <node> -value '"answer"' -by alice` or
+`Client.Resume(ctx, id, node, v, packtrail.WithResumedBy("alice"))`; `-by`
+records who answered on the execution, the step's end log line and its spans.
 
 ## crews
 
@@ -296,6 +306,14 @@ only the first. `retry` works as for crews: every agent step of the pattern
 gets it, e.g. `retry: {max_attempts: 3, delay: 2s}` for real models. Each
 runs as a flow named after it; `stiggy compile` shows the graph.
 
+The choices patterns generate have **named rules**, recorded on
+`ChoiceEvaluated` events (`stiggy history`), so the history says why a loop
+ended: `passed` (evaluator or crew guardrail accepted), `next_round`,
+`max_rounds` (evaluator-optimizer returns the last output, debate goes to its
+judge), `retry` and `max_retries` (a crew guardrail gave up; the crew goes on).
+Go constants: `patterns.RulePassed`, `RuleNextRound`, `RuleMaxRounds`,
+`RuleRetry`, `RuleMaxRetries`.
+
 ## expose
 
 ```yaml
@@ -316,6 +334,59 @@ away; without the header, an execution whose caller is gone is cancelled.
 schedules:
   morning: {flow: launch, cron: "0 0 7 * * *", input: {product: stiggy}}
 ```
+
+## tracing
+
+Every agent step and exposed-agent request records spans: `stiggy.step <node>`
+(or `stiggy.request <agent>`), the agent's run under it (`invoke_agent`), its
+model calls (`chat <model>`), tool calls (`execute_tool <tool>`), memory,
+retrieval, and each delegate's run under the tool call that asked it. A step
+whose execution was started with a traceparent (packtrail `WithTraceparent`)
+joins that trace. Spans carry `stiggy.exec`, `stiggy.flow`, `stiggy.node`,
+`stiggy.attempt`, `stiggy.agent` (and `stiggy.resumed_by`), with the execution
+id as session.
+
+```yaml
+tracing:
+  exporter: otlp                 # otlp | jsonfile | text (required)
+  endpoint: otel-collector:4318  # host:port or base URL; default OTEL_EXPORTER_OTLP_*, else localhost:4318
+  insecure: true                 # plain HTTP
+  headers: {authorization: "Bearer ${OTEL_TOKEN}"}
+  service_name: newsroom         # default OTEL_SERVICE_NAME, else the namespace
+  content: {capture: false, max_bytes: 65536}
+```
+
+| Exporter | Output |
+|---|---|
+| `otlp` | OpenTelemetry over OTLP/HTTP, GenAI semantic conventions. `endpoint`, `insecure`, `headers`, `service_name` are otlp-only (validation rejects them elsewhere) |
+| `jsonfile` | One JSON line per span; `file` is required (and jsonfile-only) |
+| `text` | Indented span tree on stderr |
+
+`content` controls prompts, answers, tool arguments and results: unset, otlp
+exports none and jsonfile/text export all. `capture: true` enables it for otlp
+(each value cut at `max_bytes`, default 64 KiB). Without a `tracing` section
+spans only feed the step's counters and debug lines. In Go,
+`stiggy.WithTracing(trace.WithIDSource(exp.IDSource()), trace.WithProcessor(exp))`
+takes phero trace provider options and replaces the fleet's `tracing:`; the
+App shuts the provider down when `Run` returns, but an OTel `TracerProvider`
+behind it is the caller's to shut down. See `examples/tracing` (Jaeger via
+docker-compose).
+
+## Logs
+
+Online commands take `-log-level debug|info|warn|error` (default
+`$STIGGY_LOG_LEVEL` or `info`) and `-log-format text|json` (default
+`$STIGGY_LOG_FORMAT` or `text`); logs go to stderr. At Info, every attempt of a
+step logs `stiggy: step started` / `stiggy: step ended` with `outcome`,
+`duration`, usage, `route`, and, when they apply: `stop_reason` (`final`,
+`max_iterations`, `stopped` = the agent called `ask_human`, `cancelled`,
+`guardrail`, `handoff`, `error`), `iterations`, `ttft`, `llm_calls`,
+`tool_calls`, `tool_errors`, `tools`, `route_by`/`route_reason`,
+`review_kind`/`review_outcome`/`reviewed_by`/`review_wait`, `retry_after`,
+`status_code`, `trace_id`. A failed attempt ends at Warn with `err`. An exposed
+agent logs `stiggy: request started` / `request ended` for every request it
+answers. Debug lines carry model output and tool arguments (plus `span_id`):
+keep them out of shared log stores when prompts hold private data.
 
 ## Worker kinds
 

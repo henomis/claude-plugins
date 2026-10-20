@@ -41,7 +41,7 @@ pins, or the latest release. The output has three parts:
 models, tools, agents, knowledge, flows, crews, patterns, CLI and the Go
 library. Then:
 
-1. **Look up every field you write.** `references/fleet-reference.md` (bundled)
+1. **Look up every field you write.** `references/fleet-reference.md` (bundled, for v0.3.1)
    lists every section, field, memory type, tool type and template variable.
    If the project uses a different stiggy version, the module's
    `web/guide.html` is the authority. Grep it for `<h2` to find the section,
@@ -154,8 +154,16 @@ execution, node, agent and step is calling. Trust it over the model's arguments.
 - **Gemini with tools**: use `provider: google` (native), not the
   OpenAI-compatible endpoint.
 - **Human in the loop**: `routes: [..., human]` gives the agent `ask_human`, and
-  `human_input` adds review. Resume with `stiggy resume <exec> <node> -value '"answer"'`
-  or `Client.Resume`. The question is in `State.Tasks[node].Interrupt`.
+  `human_input` adds review. Resume with `stiggy resume <exec> <node> -value '"answer"' -by <who>`
+  or `Client.Resume(..., packtrail.WithResumedBy(who))`. The question is in
+  `State.Tasks[node].Interrupt`.
+- **Observability**: add a `tracing:` section (`otlp`, `jsonfile` or `text`) to
+  export spans of every step, model call, tool call and delegate; in Go use
+  `stiggy.WithTracing(...)`. Prompt content is off for otlp unless
+  `content: {capture: true}`. Step end log lines report `stop_reason`, usage,
+  tool and LLM call counts; budgets can cap `llm_calls`, `tool_calls`,
+  `tokens_reasoning` and per-model/per-agent cost. See the `tracing` and
+  `Logs` sections of `references/fleet-reference.md`.
 
 ## Deploying
 
@@ -190,6 +198,7 @@ programs. Read the closest one before you write your own:
 | One exposed agent reused by several programs | `translator` |
 | Using another team's agent over NATS | `remote` |
 | Multi-agent simulation | `socialsim` |
+| Tracing spans to Jaeger (OTLP) | `tracing` |
 
 The examples use `examples/internal/extest` for tests, and another module can't
 import it. In the user's app, connect with `nats.Connect` and test against

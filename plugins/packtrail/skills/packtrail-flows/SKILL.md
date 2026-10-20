@@ -45,7 +45,7 @@ Then:
    `nats.Connect(os.Getenv("NATS_URL"))` (default `nats.DefaultURL`) and use
    an `errgroup` or plain goroutines instead.
 2. **Look up every node field and option** in `references/docs.md` (bundled,
-   written for v1.0.1). If the project uses another version, use the module's
+   written for v1.0.3). If the project uses another version, use the module's
    `web/docs.html` instead.
 3. **Check each Go API you call** with `cd <source dir> && go doc ./<pkg> <Symbol>` (this works before the user's module exists), for example
    `go doc ./worker Job`.
@@ -129,8 +129,8 @@ nodes:
   - id: check
     type: choice
     rules:
-      - {when: "results.draft.score >= 8", to: approve}
-      - {when: "visits.draft >= 3", to: $end}
+      - {name: good_enough, when: "results.draft.score >= 8", to: approve}  # name: optional, shows in history
+      - {name: too_many_tries, when: "visits.draft >= 3", to: $end}
       - {default: true, to: draft}
   - {id: approve, type: await, signal: approval, timeout: 48h, on_timeout: give_up, next: publish}
   - {id: publish, type: task, kind: publisher}
@@ -142,7 +142,7 @@ start: draft
 |---|---|
 | `task` | A job for a worker `kind`. `dynamic: [a, b]` lets the worker pick the next node with `Result.Next` |
 | `choice` | Branch on `rules` ([expr](https://github.com/expr-lang/expr) expressions). `to: $end` completes |
-| `fanout` + `join` | Static parallel branches. The fanout's `next` must be its join. Branches have no `next`. Join `policy`: `all`, `any`, `quorum:N` |
+| `fanout` + `join` | Static parallel branches. The fanout's `next` must be its join. Branches have no `next`. Join `policy`: `all`, `any`, `quorum:N`, or `min:N` (wait for every branch, succeed if ≥ N did; tolerate failures without losing results) |
 | `map` | Data-driven fan-out: `over: input.docs`, `max_parallel`. Each instance reads `j.Item` |
 | `await` | Wait for a signal (`timeout` required). For human approval and external events |
 | `subflow` | Run another flow as a child: `flow`, `input` (an expression) |
@@ -169,9 +169,14 @@ Validate offline before running: `packtrail validate flows/*.yaml`, or
   `j.Item(&v)` (map), `j.Signal(name, &v)`, `j.DecodeMeta(&v)` (node `meta`).
 - **Human in the loop from inside a task**: `return nil, worker.Interrupt(question)`.
   The execution waits. `c.Resume(ctx, id, node, answer)` re-runs the node, and
-  there `j.Resumed(&answer)` returns true.
+  there `j.Resumed(&answer)` returns true. Pass `packtrail.WithResumedBy(reviewer)`
+  to record who answered; the worker sees it as `j.Context.ResumedBy`.
 - **Streaming**: `j.Progress(v)`; clients read it with `c.Progress(ctx, id)`.
   Progress is never stored.
+- **Logging**: log through `j.Logger()`. Its lines carry `exec`, `flow`, `node`,
+  `attempt`, ... like the engine's, plus `trace_id`/`span_id` when the execution
+  was started with `packtrail.WithTraceparent(tp)`. Pass a traceparent at
+  `Start` to join packtrail logs to the caller's distributed trace.
 - Only `Output`, `Writes` (declared channels only), `Next` (declared `dynamic`
   only) and `Usage` go back to the engine.
 
@@ -179,10 +184,10 @@ Validate offline before running: `packtrail validate flows/*.yaml`, or
 
 | Need | Call |
 |---|---|
-| Start / idempotent start | `Start(ctx, flow, input, packtrail.WithExecutionID(id))` |
+| Start / idempotent start | `Start(ctx, flow, input, packtrail.WithExecutionID(id))`; `WithTraceparent(tp)` links a trace |
 | Wait for the end / for a condition | `Wait`, `WaitUntil(ctx, id, func(*State) bool)` |
 | Send an event to an `await` | `Signal(ctx, id, name, payload)` (buffered if it arrives early) |
-| Answer a `worker.Interrupt` | `Resume(ctx, id, node, value)` |
+| Answer a `worker.Interrupt` | `Resume(ctx, id, node, value, packtrail.WithResumedBy(who))` |
 | Write channels now | `Update(ctx, id, writes)` |
 | Inspect | `Get`, `History`, `StateAt(ctx, id, seq)`, `Watch`, `List` |
 | Time travel | `Fork(ctx, id, seq, packtrail.WithForkWrites(w))`, `Rerun(ctx, id, node)` |
@@ -202,6 +207,7 @@ On a `State`, use `st.Result(node, &v)`, `st.Channel(name, &v)`,
 - **Partitions are permanent** per namespace (`WithPartitions`, default 64).
   Choose the count up front.
 - Alert on `Engine.Metrics(ctx).DispatchStall`.
+- Logs: engine `WithLogger`, `worker.WithLogger`, `WithClientLogger`; debug level gives one line per decision/job. CLI and `packtrail-ui` take `-log-level` and `-log-format`.
 - CLI: `packtrail run | start | get | history | fork | rerun | update | signal | cancel`.
   `packtrail-ui` is a debugging dashboard. It has no auth and binds to loopback.
 
